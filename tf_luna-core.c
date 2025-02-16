@@ -14,20 +14,43 @@ static int send_command(struct tf_luna_sensor *sensor, luna_cmd_id_t cmd_id, u8 
     return send_serial_command(sensor, cmd_id, params, params_len);
 }
 
-static int set_sample_freq(struct tf_luna_sensor *sensor, uint16_t freq)
+static int set_sample_freq(struct tf_luna_sensor *sensor, u16 divisor)
 {
     luna_cmd_id_t cmd_id = ID_SAMPLE_FREQ;
+
+    u16 freq = 250;
+    if (divisor == 0)
+    {
+        // Trigger Mode
+        freq = 0;
+    }
+    else if (divisor < 2 || divisor > 500)
+    {
+        pr_err("Specified frequency divisor is out of the range [2,500] for the " DEVICE_NAME "\n");
+        return -EINVAL;
+    }
+
+    freq = 500 / divisor;
     u8 freq_lower = freq & 0xFF;
     u8 freq_upper = (freq >> 8) & 0xFF;
     u8 params[2] = {freq_lower, freq_upper};
+    bool trigger_mode = (freq == 0);
     int ret;
     ret = send_command(sensor, cmd_id, params, 2);
     if (ret < 0)
     {
-        pr_err("Failed to set TF-Luna sample frequency");
+        pr_err("Failed to set TF-Luna sample frequency\n");
         return ret;
     }
+    sensor->sampling_frequency = freq;
+    sensor->trigger_mode = trigger_mode;
+    sensor->sampling_divisor = divisor;
     return 0;
+}
+
+static int set_to_trigger_mode(struct tf_luna_sensor *sensor)
+{
+    return set_sample_freq(sensor, 0);
 }
 
 // Sensor IIO Data Channels
@@ -106,7 +129,7 @@ int tf_luna_probe(struct iio_dev *indio_dev)
     mutex_init(&sensor->lock);
 
     // Sets the device to trigger/poll mode
-    ret = set_sample_freq(sensor, 0);
+    ret = set_to_trigger_mode(sensor);
     if (ret)
     {
         pr_err("Failed to initialize TF-Luna in trigger mode\n");
