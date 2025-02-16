@@ -22,8 +22,10 @@ struct tf_luna_sensor
     struct serdev_device *serdev;
     struct mutex lock;
     bool driver_init;
-    bool trigger_mode;
     int baudrate;
+    bool trigger_mode;
+    int sampling_divisor;
+    int sampling_frequency;
     int distance_raw;
     int distance_cm;
     int distance_mm;
