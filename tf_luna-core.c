@@ -29,8 +29,11 @@ static int set_sample_freq(struct tf_luna_sensor *sensor, u16 divisor)
         pr_err("Specified frequency divisor is out of the range [2,500] for the " DEVICE_NAME "\n");
         return -EINVAL;
     }
+    else
+    {
+        freq = 500 / divisor;
+    }
 
-    freq = 500 / divisor;
     u8 freq_lower = freq & 0xFF;
     u8 freq_upper = (freq >> 8) & 0xFF;
     u8 params[2] = {freq_lower, freq_upper};
