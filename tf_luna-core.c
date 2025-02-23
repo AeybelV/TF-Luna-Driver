@@ -1,4 +1,5 @@
 #include "tf_luna.h"
+#include <linux/completion.h>
 #include <linux/export.h>
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
@@ -11,11 +12,34 @@
 static int send_command(struct tf_luna_sensor *sensor, luna_cmd_id_t cmd_id, u8 *params, size_t params_len)
 {
     // TODO: Address this to be capable for i2c as well
+    pr_info("Sending TF-Luna command\n");
     return send_serial_command(sensor, cmd_id, params, params_len);
+}
+
+static int poll_device(struct tf_luna_sensor *sensor)
+{
+    luna_cmd_id_t cmd_id = ID_SAMPLE_TRIG;
+    int ret = send_command(sensor, cmd_id, NULL, 0);
+    if (ret < 0)
+    {
+        pr_err("Failed to poll device for measurements\n");
+        return ret;
+    }
+
+    ret = wait_for_completion_interruptible_timeout(&sensor->frame_ready, TF_LUNA_TIMEOUT);
+
+    if (!ret)
+    {
+        pr_warn("TF-Luna polling timeout\n");
+        ret = -ETIMEDOUT;
+    }
+
+    return ret < 0 ? ret : 0;
 }
 
 static int set_sample_freq(struct tf_luna_sensor *sensor, u16 divisor)
 {
+    pr_info("Setting TF-Luna frequency\n");
     luna_cmd_id_t cmd_id = ID_SAMPLE_FREQ;
 
     u16 freq = 250;
@@ -29,8 +53,11 @@ static int set_sample_freq(struct tf_luna_sensor *sensor, u16 divisor)
         pr_err("Specified frequency divisor is out of the range [2,500] for the " DEVICE_NAME "\n");
         return -EINVAL;
     }
+    else
+    {
+        freq = 500 / divisor;
+    }
 
-    freq = 500 / divisor;
     u8 freq_lower = freq & 0xFF;
     u8 freq_upper = (freq >> 8) & 0xFF;
     u8 params[2] = {freq_lower, freq_upper};
@@ -50,6 +77,7 @@ static int set_sample_freq(struct tf_luna_sensor *sensor, u16 divisor)
 
 static int set_to_trigger_mode(struct tf_luna_sensor *sensor)
 {
+    pr_info("Setting TF-Luna to Trigger Mode\n");
     return set_sample_freq(sensor, 0);
 }
 
@@ -76,8 +104,7 @@ static int tf_luna_read_raw(struct iio_dev *indio_dev, struct iio_chan_spec cons
 
     // Locks a mutex during a read
     mutex_lock(&sensor->lock);
-
-    // TODO: Read the actual sensor readings
+    poll_device(sensor);
     switch (chan->type)
     {
     case IIO_DISTANCE:
@@ -127,6 +154,7 @@ int tf_luna_probe(struct iio_dev *indio_dev)
     sensor->temperature_raw = 0;
 
     mutex_init(&sensor->lock);
+    init_completion(&sensor->frame_ready);
 
     // Sets the device to trigger/poll mode
     ret = set_to_trigger_mode(sensor);

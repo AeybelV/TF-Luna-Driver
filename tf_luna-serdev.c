@@ -1,15 +1,24 @@
 // Driver probe
 #include "tf_luna.h"
+#include <linux/completion.h>
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
 #include <linux/iio/types.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/minmax.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/serdev.h>
 #include <linux/types.h>
+#include <linux/version.h>
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
+#include <asm/unaligned.h>
+#else
+#include <linux/unaligned.h>
+#endif
 
 // ========== Helper Functions ==========
 
@@ -35,10 +44,55 @@ static u8 calculate_checksum(const u8 *buf, size_t len)
 static int serdev_luna_receive_buf(struct serdev_device *serdev, const u8 *buf, size_t size)
 {
     struct tf_luna_sensor *sensor = serdev_device_get_drvdata(serdev);
-    pr_info("Luna receive buff1\n");
     if (sensor->driver_init)
     {
-        pr_info("Luna receive buff2\n");
+        // During device probe we sent some commands to the device, but ignore the response as serial callback isnt
+        // registered yet The moment the probe function is done, the callback with the responses from the probing
+        // process happens We ignore it, and consider the device "configured" on the first time the callback happens
+        if (!sensor->configured && size >= 6)
+        {
+            sensor->configured = true;
+            return size;
+        }
+        // Check if we are expecting a response/packet
+        if (!sensor->frame.expected_length)
+        {
+            u16 response_header;
+
+            // Wait for the header (2 bytes)
+            if (size < 2)
+                return 0;
+
+            // Header received;
+            response_header = get_unaligned_be16(buf);
+            if (response_header != TF_LUNA_MEASUREMENT_HEADER)
+                return 2;
+
+            // If the measurement header is found, we are now expecting a response/packet
+            sensor->frame.expected_length = 7;
+            sensor->frame.length = 0;
+            return 2;
+        }
+
+        // Add the current state of the buffer to the buffer
+        size_t num;
+        num = min(size, (size_t)(sensor->frame.expected_length - sensor->frame.length));
+        memcpy(sensor->frame.data + sensor->frame.length, buf, num);
+        sensor->frame.length += num;
+
+        // A full response is completed
+        if (sensor->frame.length == sensor->frame.expected_length)
+        {
+            // TODO: Check if frame is valiid, THEN perform completion
+            tf_luna_serial_measurement *measurements = (tf_luna_serial_measurement *)sensor->frame.data;
+            sensor->distance_raw = (measurements->Dist_H << 8) + measurements->Dist_L;
+            sensor->signal_strength = (measurements->Amp_H << 8) + measurements->Amp_L;
+            sensor->temperature_raw = (measurements->Temp_H << 8) + measurements->Temp_L;
+
+            complete(&sensor->frame_ready);
+            sensor->frame.expected_length = 0;
+        }
+        return num;
     }
     return 0;
 }
@@ -52,7 +106,7 @@ int send_serial_command(struct tf_luna_sensor *sensor, luna_cmd_id_t cmd_id, u8 
     u8 cmd = cmd_id & 0xFF;
     u8 msg_len = 4 + params_len;
     int ret;
-
+    pr_debug("Sending TF-Luna serial commands\n");
     // Some sanity checks to make sure the preallocated buffer is big enough
     if (params_len > sizeof(buf) - 4)
     {
@@ -65,7 +119,7 @@ int send_serial_command(struct tf_luna_sensor *sensor, luna_cmd_id_t cmd_id, u8 
     buf[2] = cmd;                    // Cmd id
 
     // Copies command parameters
-    if (params_len > 0)
+    if (params_len > 0 && params)
     {
         memcpy(&buf[3], params, params_len);
     }
